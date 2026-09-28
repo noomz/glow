@@ -44,6 +44,8 @@ type Styles struct {
 	statusBarMessageHelpStyle      func(...string) string
 	helpViewStyle                  func(...string) string
 	lineNumberStyle                func(...string) string
+	searchMatchStyle               lipgloss.Style
+	searchSelectedMatchStyle       lipgloss.Style
 
 	dividerDot            lipgloss.Style
 	dividerBar            lipgloss.Style
@@ -143,6 +145,15 @@ func newStyles(isDark bool) Styles {
 	s.lineNumberStyle = lipgloss.NewStyle().
 		Foreground(lineNumberFg).
 		Render
+
+	s.searchMatchStyle = lipgloss.NewStyle().
+		Foreground(s.adaptive("#242424", "#FFFDF5")).
+		Background(dimDullFuchsia)
+
+	s.searchSelectedMatchStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#ECFD65")).
+		Background(s.fuchsia).
+		Bold(true)
 
 	// Stash styles
 	s.dividerDot = s.darkGrayFg.SetString(" • ")
