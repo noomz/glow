@@ -544,6 +544,16 @@ func TestHighlightSizedLine(t *testing.T) {
 			osc("s=2", "Ti") + "tle x", "itl",
 			osc("s=2", "T") + sel.Render(osc("s=2", "i")) + sel.Render("tl") + "e x",
 		},
+		{
+			"grapheme clusters are kept whole",
+			osc("s=2", "fam 👨‍👨‍👦 x"), "👨",
+			osc("s=2", "fam ") + sel.Render(osc("s=2", "👨‍👨‍👦")) + osc("s=2", " x"),
+		},
+		{
+			"match starting inside a cluster",
+			osc("s=2", "fam 👨‍👨‍👦 x"), "👨‍👦",
+			osc("s=2", "fam ") + sel.Render(osc("s=2", "👨‍👨‍👦")) + osc("s=2", " x"),
+		},
 	}
 	for _, tt := range tests {
 		if got := highlight(tt.content, tt.pattern); got != tt.want {
