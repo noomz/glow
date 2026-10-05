@@ -80,7 +80,7 @@ type pagerModel struct {
 
 	// Search state to restore when the prompt is cancelled.
 	prevSearchQuery string
-	prevMatchIndex  int
+	prevMatchOffset int
 	prevYOffset     int
 
 	watcher *fsnotify.Watcher
@@ -102,6 +102,7 @@ func newPagerModel(common *commonModel) pagerModel {
 		viewport:    vp,
 		searchInput: si,
 	}
+	m.setContent("")
 	m.initWatcher()
 	return m
 }
@@ -240,7 +241,9 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 
 		case "/":
 			m.prevSearchQuery = m.searchQuery
-			m.prevMatchIndex = m.matchIndex
+			if len(m.matches) > 0 {
+				m.prevMatchOffset = m.matches[m.matchIndex][0]
+			}
 			m.prevYOffset = m.viewport.YOffset()
 			m.searching = true
 			m.searchInput.Reset()
@@ -264,26 +267,30 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 	case contentRenderedMsg:
 		log.Info("content rendered", "state", m.state)
 
+		old, oldStarts := m.stripped, m.lineStarts
 		m.setContent(string(msg))
 		cmds = append(cmds, m.watchFile)
 
-		// Re-run the active search against the new content
 		switch {
 		case m.searching:
 			// Search from where the prompt was opened, clamped to the new
 			// content, as while typing.
+			m.prevMatchOffset = shiftOffset(old, m.stripped, m.prevMatchOffset)
+			top := shiftOffset(old, m.stripped, oldStarts[m.prevYOffset])
+			m.prevYOffset = sort.Search(len(m.lineStarts), func(i int) bool {
+				return m.lineStarts[i] > top
+			}) - 1
 			m.viewport.SetYOffset(m.prevYOffset)
 			m.prevYOffset = m.viewport.YOffset()
 			m.incSearch()
 		case m.searchQuery != "":
-			// Keep the current match where possible
-			i := m.matchIndex
+			off := shiftOffset(old, m.stripped, m.matches[m.matchIndex][0])
 			m.search(m.searchQuery)
 			if len(m.matches) == 0 {
 				m.clearSearch()
 				break
 			}
-			m.matchIndex = min(i, len(m.matches)-1)
+			m.matchIndex = matchFrom(m.matches, off)
 		}
 
 	// The file was changed on disk and we're reloading it
@@ -373,7 +380,7 @@ func (m *pagerModel) cancelSearch() {
 		// The content may have changed since the prompt was opened
 		m.clearSearch()
 	} else {
-		m.matchIndex = min(m.prevMatchIndex, len(m.matches)-1)
+		m.matchIndex = matchFrom(m.matches, m.prevMatchOffset)
 	}
 	m.viewport.SetYOffset(m.prevYOffset)
 }
@@ -486,6 +493,52 @@ func nearestMatch(matchLines []int, line int) int {
 		}
 	}
 	return 0
+}
+
+// matchFrom returns the index of the first match at or after byte offset off,
+// wrapping around to the first match.
+func matchFrom(matches [][]int, off int) int {
+	return sort.Search(len(matches), func(i int) bool {
+		return matches[i][0] >= off
+	}) % len(matches)
+}
+
+// shiftOffset returns where the text at byte offset off of before is in after.
+// Lines are the unit of change: an offset in a line that was edited moves to
+// the start of that line.
+func shiftOffset(before, after string, off int) int {
+	n := min(len(before), len(after))
+	prefix := 0
+	for prefix < n && before[prefix] == after[prefix] {
+		prefix++
+	}
+	if !lineEndsAt(before, prefix) || !lineEndsAt(after, prefix) {
+		prefix = strings.LastIndexByte(before[:prefix], '\n') + 1
+	}
+	if off < prefix {
+		return off
+	}
+	suffix := 0
+	for suffix < n-prefix && before[len(before)-1-suffix] == after[len(after)-1-suffix] {
+		suffix++
+	}
+	for suffix > 0 && (!lineStartsAt(before, len(before)-suffix) || !lineStartsAt(after, len(after)-suffix)) {
+		suffix--
+	}
+	if suffix > 0 && off >= len(before)-suffix {
+		return off + len(after) - len(before)
+	}
+	return prefix
+}
+
+// lineEndsAt reports whether a line of s ends at byte i.
+func lineEndsAt(s string, i int) bool {
+	return i == len(s) || s[i] == '\n'
+}
+
+// lineStartsAt reports whether a line of s starts at byte i.
+func lineStartsAt(s string, i int) bool {
+	return i == 0 || s[i-1] == '\n'
 }
 
 // highlightLines styles the matches on rows, the viewport's view of the

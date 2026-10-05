@@ -95,6 +95,35 @@ func TestSearchHighlightFollowsBackgroundColor(t *testing.T) {
 	}
 }
 
+func TestSearchBeforeFirstRender(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+	if err := os.WriteFile(path, []byte("alpha\nbeta"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var tm tea.Model = newModel(Config{Path: path}, "")
+	send := func(msgs ...tea.Msg) {
+		for _, msg := range msgs {
+			tm, _ = tm.Update(msg)
+		}
+	}
+	key := func(s string) tea.KeyPressMsg { return tea.KeyPressMsg{Code: []rune(s)[0], Text: s} }
+	// The document view opens before the first render finishes
+	send(tea.WindowSizeMsg{Width: 80, Height: 24}, key("/"))
+	if !tm.(model).pager.searching {
+		t.Fatal("expected the prompt to open before the first render")
+	}
+	send(contentRenderedMsg("alpha\nbeta"))
+	send(key("b"), key("e"), tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m := tm.(model); len(m.pager.matches) != 1 || m.pager.matchLines[0] != 1 {
+		t.Errorf("expected one match on line 1, got %v on lines %v", m.pager.matches, m.pager.matchLines)
+	}
+	if v := tm.View().Content; !strings.Contains(v, "[1/1]") {
+		t.Errorf("expected [1/1] in the status bar, got %q", v)
+	}
+}
+
 func TestSearchCtrlCAndCtrlZ(t *testing.T) {
 	var tm tea.Model = newModel(Config{}, "")
 	m := tm.(model)
