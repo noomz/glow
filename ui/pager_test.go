@@ -49,27 +49,27 @@ func TestGlamourRenderTextSizing(t *testing.T) {
 
 func TestFindMatchesSmartcase(t *testing.T) {
 	content := "Foo foo FOO"
-	if got := findMatches(content, "foo", 0); len(got) != 3 {
+	if got := findMatches(content, "foo"); len(got) != 3 {
 		t.Errorf("expected lowercase pattern to match case-insensitively, got %v", got)
 	}
-	if got := findMatches(content, "Foo", 0); !reflect.DeepEqual(got, [][]int{{0, 3}}) {
+	if got := findMatches(content, "Foo"); !reflect.DeepEqual(got, [][]int{{0, 3}}) {
 		t.Errorf("expected pattern with uppercase to match case-sensitively, got %v", got)
 	}
-	if got := findMatches(content, "", 0); got != nil {
+	if got := findMatches(content, ""); got != nil {
 		t.Errorf("expected empty pattern to not match, got %v", got)
 	}
 }
 
 func TestFindMatchesRegex(t *testing.T) {
-	if got := findMatches("fo foo fooo", "fo{2,}", 0); !reflect.DeepEqual(got, [][]int{{3, 6}, {7, 11}}) {
+	if got := findMatches("fo foo fooo", "fo{2,}"); !reflect.DeepEqual(got, [][]int{{3, 6}, {7, 11}}) {
 		t.Errorf("expected regex matches, got %v", got)
 	}
 	// Invalid regular expressions are matched literally
-	if got := findMatches("x a(b y", "a(b", 0); !reflect.DeepEqual(got, [][]int{{2, 5}}) {
+	if got := findMatches("x a(b y", "a(b"); !reflect.DeepEqual(got, [][]int{{2, 5}}) {
 		t.Errorf("expected literal match for invalid regex, got %v", got)
 	}
 	// Empty matches are dropped
-	if got := findMatches("bbb", "a*", 0); len(got) != 0 {
+	if got := findMatches("bbb", "a*"); len(got) != 0 {
 		t.Errorf("expected no empty matches, got %v", got)
 	}
 }
@@ -81,10 +81,10 @@ func TestFindMatchesGutter(t *testing.T) {
 		styles.lineNumberStyle("  11") + "1"
 	// Offsets into "   1one 1\n   2two\n  111"
 	want := [][]int{{8, 9}, {22, 23}}
-	if got := findMatches(content, "1", lineNumberWidth); !reflect.DeepEqual(got, want) {
+	if got := findMatches(blankGutter(searchText(content), lineNumberWidth), "1"); !reflect.DeepEqual(got, want) {
 		t.Errorf("expected gutter to be excluded, got %v, want %v", got, want)
 	}
-	if got := findMatches(content, "1", 0); len(got) != 5 {
+	if got := findMatches(searchText(content), "1"); len(got) != 5 {
 		t.Errorf("expected gutter matches without a gutter, got %v", got)
 	}
 }
@@ -93,9 +93,8 @@ func TestHighlightMatches(t *testing.T) {
 	styles := newStyles(true)
 	red := lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Render
 	content := red("aaaa") + "\n" + red("bb foo") + "\ncc foo"
-	matches := findMatches(content, "foo", 0)
 
-	out := highlightMatches(content, matches, 1, styles.searchMatchStyle, styles.searchSelectedMatchStyle)
+	out := highlightAll(t, content, "foo", 1)
 	if xansi.Strip(out) != xansi.Strip(content) {
 		t.Errorf("expected highlighting to keep the text, got %q", xansi.Strip(out))
 	}
@@ -123,6 +122,26 @@ func newTestPager(t *testing.T, content string) pagerModel {
 	m.setSize(80, 24)
 	m, _ = m.update(contentRenderedMsg(content))
 	return m
+}
+
+// highlightAll returns the pager's view of content with pattern searched and
+// the given match selected, one row per line of content.
+func highlightAll(t *testing.T, content, pattern string, selected int) string {
+	t.Helper()
+	m := newTestPager(t, content)
+	m.search(pattern)
+	m.matchIndex = selected
+	return strings.Join(viewRows(m, strings.Count(content, "\n")+1), "\n")
+}
+
+// viewRows returns the first n rows of the pager's view without the padding
+// the viewport adds.
+func viewRows(m pagerModel, n int) []string {
+	rows := strings.Split(m.View(), "\n")[:n]
+	for i, row := range rows {
+		rows[i] = strings.TrimRight(row, " ")
+	}
+	return rows
 }
 
 func typeKeys(m pagerModel, keys ...tea.KeyPressMsg) pagerModel {
@@ -165,6 +184,9 @@ func TestPagerSearch(t *testing.T) {
 	}
 	if m.viewport.YOffset() == 0 {
 		t.Errorf("expected viewport to scroll to the match")
+	}
+	if want := m.common.styles.searchSelectedMatchStyle.Render("alpha"); !strings.Contains(m.View(), want) {
+		t.Errorf("expected the view to highlight the selected match, got %q", m.View())
 	}
 
 	m = typeKeys(m, runeKeys("n")...)
@@ -209,18 +231,18 @@ func TestPagerSearchRerender(t *testing.T) {
 	if len(m.matches) != 2 || m.matchIndex != 1 {
 		t.Errorf("expected second of 2 matches after reload, got %d/%d", m.matchIndex+1, len(m.matches))
 	}
-	if want := m.common.styles.searchSelectedMatchStyle.Render("ALPHA"); !strings.Contains(m.viewport.View(), want) {
-		t.Errorf("expected reloaded content to be highlighted, got %q", m.viewport.View())
+	if want := m.common.styles.searchSelectedMatchStyle.Render("ALPHA"); !strings.Contains(m.View(), want) {
+		t.Errorf("expected reloaded content to be highlighted, got %q", m.View())
 	}
 }
 
 func TestFindMatchesMultiline(t *testing.T) {
 	// ^ and $ match at line boundaries
-	if got := findMatches("foo\nxfoo\nfoo", "^foo$", 0); !reflect.DeepEqual(got, [][]int{{0, 3}, {9, 12}}) {
+	if got := findMatches("foo\nxfoo\nfoo", "^foo$"); !reflect.DeepEqual(got, [][]int{{0, 3}, {9, 12}}) {
 		t.Errorf("expected per-line anchors, got %v", got)
 	}
 	// Escapes like \S don't count as uppercase for smartcase
-	if got := findMatches("FOO bar", `\S+o`, 0); !reflect.DeepEqual(got, [][]int{{0, 3}}) {
+	if got := findMatches("FOO bar", `\S+o`); !reflect.DeepEqual(got, [][]int{{0, 3}}) {
 		t.Errorf("expected escaped uppercase to be ignored for smartcase, got %v", got)
 	}
 }
@@ -228,17 +250,67 @@ func TestFindMatchesMultiline(t *testing.T) {
 func TestHighlightMatchesWide(t *testing.T) {
 	sel := newStyles(true).searchSelectedMatchStyle
 	content := "日本語 foo"
-	out := highlightMatches(content, findMatches(content, "foo", 0), 0, lipgloss.Style{}, sel)
+	out := highlightAll(t, content, "foo", 0)
 	if want := "日本語 " + sel.Render("foo"); out != want {
 		t.Errorf("expected match after wide characters to be highlighted, got %q, want %q", out, want)
+	}
+}
+
+func TestHighlightTabs(t *testing.T) {
+	sel := newStyles(true).searchSelectedMatchStyle
+	for _, content := range []string{"a\tfoo\nz", "\x1b]66;s=2;a\tfoo\x1b\\\nz"} {
+		m := newTestPager(t, content)
+		m.search("foo")
+		first := strings.TrimRight(strings.SplitN(m.View(), "\n", 2)[0], " ")
+		want := "a    " + sel.Render("foo")
+		if strings.HasPrefix(content, "\x1b]66;") {
+			want = "\x1b]66;s=2;a    \x1b\\" + sel.Render("\x1b]66;s=2;foo\x1b\\")
+		}
+		if first != want {
+			t.Errorf("expected the highlight to follow the tab shown as spaces, got %q, want %q", first, want)
+		}
+	}
+}
+
+func TestHighlightScrolledHorizontally(t *testing.T) {
+	sel := newStyles(true).searchSelectedMatchStyle
+	osc := func(s string) string { return "\x1b]66;s=2;" + s + "\x1b\\" }
+	long := "\n" + strings.Repeat("x", 40) // lets the viewport scroll
+	for _, tt := range []struct {
+		name, content  string
+		width, xOffset int
+		pattern, want  string
+	}{
+		{"plain", "abcdefghij foo xyz", 10, 8, "foo", "ij " + sel.Render("foo") + " xyz"},
+		// The viewport keeps the wide character the left edge falls in
+		{"wide character at the left edge", "日本語日本語 foo" + long, 14, 3, "foo", "本語日本語 " + sel.Render("foo")},
+		// Sized text is zero-width to the viewport, so only the plain text scrolls
+		{"sized heading", "    " + osc("Title") + long, 20, 3, "itl", " " + osc("T") + sel.Render(osc("itl")) + osc("e")},
+		{"match scrolled off", "foo " + strings.Repeat("x", 30), 10, 20, "foo", "xxxxxxxxxx"},
+	} {
+		m := newTestPager(t, tt.content)
+		m.setSize(tt.width, 5)
+		m.search(tt.pattern)
+		m.viewport.SetXOffset(tt.xOffset)
+		if got := viewRows(m, 1)[0]; got != tt.want {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestHighlightZeroWidthLine(t *testing.T) {
+	// The viewport shows nothing for a lone line it measures as zero width
+	m := newTestPager(t, "\x1b]66;s=2;Title\x1b\\")
+	m.search("itl")
+	if row := viewRows(m, 1)[0]; row != "" || m.viewport.TotalLineCount() != 0 {
+		t.Errorf("expected nothing to highlight on an empty view, got row %q with %d lines", row, m.viewport.TotalLineCount())
 	}
 }
 
 func TestHighlightMatchesSpanningLines(t *testing.T) {
 	sel := newStyles(true).searchSelectedMatchStyle
 	content := "ab\ncd"
-	matches := findMatches(content, `b\nc`, 0)
-	out := highlightMatches(content, matches, 0, lipgloss.Style{}, sel)
+	out := highlightAll(t, content, `b\nc`, 0)
 	if want := "a" + sel.Render("b") + "\n" + sel.Render("c") + "d"; out != want {
 		t.Errorf("expected match to be highlighted on both lines, got %q, want %q", out, want)
 	}
@@ -257,12 +329,12 @@ func TestHighlightMatchesTextSizing(t *testing.T) {
 		t.Fatalf("expected sized text to be searchable, got %q", got)
 	}
 
-	matches := findMatches(content, "itl|bc", 0)
+	matches := findMatches(searchText(content), "itl|bc")
 	if !reflect.DeepEqual(matches, [][]int{{1, 4}, {7, 9}}) {
 		t.Fatalf("expected matches in sized text, got %v", matches)
 	}
 
-	lines := strings.Split(highlightMatches(content, matches, 0, styles.searchMatchStyle, sel), "\n")
+	lines := strings.Split(highlightAll(t, content, "itl|bc", 0), "\n")
 	// Sized text is split around the match, restoring the style after it
 	if want := bold + osc("s=2", "T") + sel.Render(osc("s=2", "itl")) + bold + osc("s=2", "e") + "\x1b[m"; lines[0] != want {
 		t.Errorf("expected sized heading to be highlighted in place, got %q, want %q", lines[0], want)
@@ -273,6 +345,22 @@ func TestHighlightMatchesTextSizing(t *testing.T) {
 	}
 	if want := osc("s=3", "Other"); lines[2] != want {
 		t.Errorf("expected line without matches to be untouched, got %q", lines[2])
+	}
+}
+
+func TestHighlightSkipsEmptyRanges(t *testing.T) {
+	// A match spanning an empty line has nothing to style there
+	if lines := strings.Split(highlightAll(t, "a\n\nb", `a\n\nb`, 0), "\n"); lines[1] != "" {
+		t.Errorf("expected the empty line untouched, got %q", lines[1])
+	}
+
+	// Nor on a line scrolled entirely out of view
+	m := newTestPager(t, "foo\nbar\n"+strings.Repeat("x", 60))
+	m.setSize(10, 8)
+	m.search(`foo\nbar`)
+	m.viewport.SetXOffset(20)
+	if row := viewRows(m, 1)[0]; row != "" {
+		t.Errorf("expected the line left of the view untouched, got %q", row)
 	}
 }
 
@@ -308,7 +396,8 @@ func TestHighlightSizedLine(t *testing.T) {
 	sel := styles.searchSelectedMatchStyle
 	osc := func(meta, s string) string { return "\x1b]66;" + meta + ";" + s + "\x1b\\" }
 	highlight := func(content, pattern string) string {
-		return highlightMatches(content, findMatches(content, pattern, 0), 0, styles.searchMatchStyle, sel)
+		// A lone sized line is zero-width to the viewport, which drops it
+		return strings.TrimSuffix(highlightAll(t, content+"\nz", pattern, 0), "\nz")
 	}
 
 	tests := []struct {
@@ -328,11 +417,6 @@ func TestHighlightSizedLine(t *testing.T) {
 			"match crossing from sized into plain text",
 			osc("s=2", "Ti") + "tle x", "itl",
 			osc("s=2", "T") + sel.Render(osc("s=2", "i")) + sel.Render("tl") + "e x",
-		},
-		{
-			"tabs are kept",
-			osc("s=2", "T") + "\tx", `\tx`,
-			osc("s=2", "T") + sel.TabWidth(lipgloss.NoTabConversion).Render("\tx"),
 		},
 	}
 	for _, tt := range tests {
