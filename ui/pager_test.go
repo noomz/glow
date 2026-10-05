@@ -236,6 +236,59 @@ func TestPagerSearchRerender(t *testing.T) {
 	}
 }
 
+func TestPagerSearchRerenderKeepsMatch(t *testing.T) {
+	m := newTestPager(t, "needle 1\nneedle 2\nneedle 3")
+	m = typeKeys(m, runeKeys("/needle")...)
+	m = typeKeys(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = typeKeys(m, runeKeys("n")...)
+	if m.matchIndex != 1 || m.matchLines[1] != 1 {
+		t.Fatalf("expected the second match on line 1, got match %d on line %d", m.matchIndex, m.matchLines[m.matchIndex])
+	}
+
+	m, _ = m.update(contentRenderedMsg("needle 1\nneedle 2\nneedle 3\nfiller"))
+	if m.matchIndex != 1 || len(m.matches) != 3 {
+		t.Errorf("expected [2/3] after appending, got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+
+	m, _ = m.update(contentRenderedMsg("needle 0\nneedle 1\nneedle 2\nneedle 3\nfiller"))
+	if m.matchIndex != 2 || len(m.matches) != 4 {
+		t.Errorf("expected [3/4] after inserting a match above, got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+
+	m = typeKeys(m, runeKeys("/x")...)
+	m, _ = m.update(contentRenderedMsg("needle -1\nneedle 0\nneedle 1\nneedle 2\nneedle 3\nfiller"))
+	m = typeKeys(m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.matchIndex != 3 || len(m.matches) != 5 {
+		t.Errorf("expected [4/5] after cancelling, got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+}
+
+func TestShiftOffset(t *testing.T) {
+	for _, tt := range []struct {
+		name, old, new string
+		off, want      int
+	}{
+		{"unchanged", "ab\ncd\nef", "ab\ncd\nef", 3, 3},
+		{"line appended", "ab\ncd", "ab\ncd\nef", 3, 3},
+		{"line inserted above", "ab\ncd", "xx\nab\ncd", 3, 6},
+		{"line deleted above", "xx\nab\ncd", "ab\ncd", 6, 3},
+		{"line replaced above", "xx\nab\ncd", "y\nab\ncd", 6, 5},
+		{"line edited below", "ab\ncd\nef", "ab\ncd\nXY", 3, 3},
+		// An edited line is a new line, so the offset moves to its start
+		{"own line edited after the match", "ab\nxx cd ef", "ab\nxx cd XY", 6, 3},
+		{"text appended to the last line", "ab cd", "ab cd ef", 3, 0},
+		{"everything changed", "abc", "xyz", 1, 0},
+		{"nothing before", "", "abc", 0, 0},
+		// The inserted line shares a prefix with the match's line
+		{"line inserted above sharing a prefix", "needle 1\nneedle 2", "needle 1\nneedle 1.5\nneedle 2", 9, 20},
+		{"same line appended below", "a\nneedle 2\nneedle 2", "a\nneedle 2\nneedle 2\nneedle 2", 11, 11},
+	} {
+		if got := shiftOffset(tt.old, tt.new, tt.off); got != tt.want {
+			t.Errorf("%s: shiftOffset(%q, %q, %d) = %d, want %d", tt.name, tt.old, tt.new, tt.off, got, tt.want)
+		}
+	}
+}
+
 func TestFindMatchesMultiline(t *testing.T) {
 	// ^ and $ match at line boundaries
 	if got := findMatches("foo\nxfoo\nfoo", "^foo$"); !reflect.DeepEqual(got, [][]int{{0, 3}, {9, 12}}) {
@@ -348,6 +401,52 @@ func TestHighlightMatchesTextSizing(t *testing.T) {
 	}
 }
 
+func TestPagerSearchRerenderInsertSharingPrefix(t *testing.T) {
+	m := newTestPager(t, "needle 1\nneedle 2")
+	m = typeKeys(m, runeKeys("/needle")...)
+	m = typeKeys(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = typeKeys(m, runeKeys("n")...)
+
+	m, _ = m.update(contentRenderedMsg("needle 1\nneedle 1.5\nneedle 2"))
+	if m.matchIndex != 2 || len(m.matches) != 3 {
+		t.Errorf("expected [3/3] after inserting a line above, got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+}
+
+func TestPagerSearchRerenderCodeFileKeepsMatch(t *testing.T) {
+	common := &commonModel{
+		cfg:    Config{GlamourEnabled: true, GlamourStyle: "dark", GlamourMaxWidth: 80},
+		styles: newStyles(true),
+		width:  80,
+		height: 24,
+	}
+	m := newPagerModel(common)
+	m.currentDocument = markdown{Note: "main.go"}
+	m.setSize(80, 24)
+	render := func(src string) string {
+		t.Helper()
+		out, err := glamourRender(m, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	m, _ = m.update(contentRenderedMsg(render("needle 1\nx\nneedle 2\ny\nneedle 3\n")))
+	m = typeKeys(m, runeKeys("/needle")...)
+	m = typeKeys(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = typeKeys(m, runeKeys("nn")...)
+	if m.matchIndex != 2 || len(m.matches) != 3 {
+		t.Fatalf("expected [3/3], got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+
+	// Inserting a line at the top renumbers every line's gutter
+	m, _ = m.update(contentRenderedMsg(render("new\nneedle 1\nx\nneedle 2\ny\nneedle 3\n")))
+	if m.matchIndex != 2 || len(m.matches) != 3 {
+		t.Errorf("expected [3/3] after inserting a line above in a code file, got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+}
+
 func TestHighlightSkipsEmptyRanges(t *testing.T) {
 	// A match spanning an empty line has nothing to style there
 	if lines := strings.Split(highlightAll(t, "a\n\nb", `a\n\nb`, 0), "\n"); lines[1] != "" {
@@ -361,6 +460,33 @@ func TestHighlightSkipsEmptyRanges(t *testing.T) {
 	m.viewport.SetXOffset(20)
 	if row := viewRows(m, 1)[0]; row != "" {
 		t.Errorf("expected the line left of the view untouched, got %q", row)
+	}
+}
+
+func TestPagerSearchRerenderDeletesSelected(t *testing.T) {
+	m := newTestPager(t, "needle 1\nneedle 2\nneedle 3")
+	m = typeKeys(m, runeKeys("/needle")...)
+	m = typeKeys(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = typeKeys(m, runeKeys("nn")...)
+
+	m, _ = m.update(contentRenderedMsg("needle 1\nneedle 2"))
+	if m.matchIndex != 0 || len(m.matches) != 2 {
+		t.Errorf("expected the selection to wrap to [1/2], got [%d/%d]", m.matchIndex+1, len(m.matches))
+	}
+}
+
+func TestPagerSearchRerenderWhileSearchingKeepsScroll(t *testing.T) {
+	content := strings.Repeat("line\n", 20) + "needle A\n" + strings.Repeat("line\n", 19) + "needle B\n" + strings.Repeat("line\n", 30)
+	m := newTestPager(t, content)
+	m.viewport.SetYOffset(30)
+	m = typeKeys(m, runeKeys("/needle")...)
+	if m.matchIndex != 1 {
+		t.Fatalf("expected the match below the scroll position, got match %d", m.matchIndex)
+	}
+
+	m, _ = m.update(contentRenderedMsg(strings.Repeat("new\n", 15) + content))
+	if m.matchIndex != 1 || m.viewport.YOffset() != 45 {
+		t.Errorf("expected the scroll position to follow the inserted lines, got match %d at line %d", m.matchIndex, m.viewport.YOffset())
 	}
 }
 
