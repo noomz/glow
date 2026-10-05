@@ -25,6 +25,7 @@ import (
 	"github.com/muesli/reflow/ansi"
 	"github.com/muesli/reflow/truncate"
 	"github.com/muesli/termenv"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -900,7 +901,8 @@ func (m *pagerModel) localDir() string {
 // ourselves, splitting sized text into separate sequences as needed.
 // Fractionally scaled text is styled a whole sequence at a time, as each of
 // its sequences carries its own width, so a highlight may cover up to a few
-// cells around the match. The selected range, if any, takes priority there.
+// cells around the match. Grapheme clusters are styled whole too, as a split
+// one isn't drawn as one glyph.
 func highlightSizedLine(line string, ranges []lipgloss.Range, selected int) string {
 	var b strings.Builder
 	var sgr strings.Builder // SGR sequences in effect, restored after highlights
@@ -916,6 +918,7 @@ func highlightSizedLine(line string, ranges []lipgloss.Range, selected int) stri
 	// write writes text found at pos, styling the parts within ranges. wrap
 	// turns each part back into its raw form.
 	write := func(text string, whole bool, wrap func(string) string) {
+		snapToClusters(text, pos, ranges)
 		for len(text) > 0 {
 			n, st, styled := len(text), lipgloss.Style{}, false
 			for k, r := range ranges {
@@ -926,7 +929,10 @@ func highlightSizedLine(line string, ranges []lipgloss.Range, selected int) stri
 					}
 				case whole:
 				case r.Start <= pos && pos < r.End:
-					n, st, styled = min(n, r.End-pos), r.Style, true
+					n = min(n, r.End-pos)
+					if !styled || k == selected {
+						st, styled = r.Style, true
+					}
 				case r.Start > pos:
 					n = min(n, r.Start-pos)
 				}
@@ -967,6 +973,26 @@ func highlightSizedLine(line string, ranges []lipgloss.Range, selected int) stri
 	}
 
 	return b.String()
+}
+
+// snapToClusters widens the ranges that start or end inside a grapheme cluster
+// of text, whose first byte is at pos, to the cluster's bounds.
+func snapToClusters(text string, pos int, ranges []lipgloss.Range) {
+	start, state := pos, -1
+	for rest := text; rest != ""; {
+		var cluster string
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		end := start + len(cluster)
+		for k, r := range ranges {
+			if r.Start > start && r.Start < end {
+				ranges[k].Start = start
+			}
+			if r.End > start && r.End < end {
+				ranges[k].End = end
+			}
+		}
+		start = end
+	}
 }
 
 // searchText strips ANSI sequences from s like ansi.Strip, but keeps the text
