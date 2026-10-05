@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,29 @@ func TestSearchKeyRouting(t *testing.T) {
 	send(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m := tm.(model); m.state != stateShowStash {
 		t.Fatalf("expected esc to leave the document, got state %s", m.state)
+	}
+}
+
+func TestSearchHighlightFollowsBackgroundColor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+	if err := os.WriteFile(path, []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var tm tea.Model = newModel(Config{Path: path}, "")
+	send := func(msgs ...tea.Msg) {
+		for _, msg := range msgs {
+			tm, _ = tm.Update(msg)
+		}
+	}
+	key := func(s string) tea.KeyPressMsg { return tea.KeyPressMsg{Code: []rune(s)[0], Text: s} }
+	send(tea.WindowSizeMsg{Width: 80, Height: 24}, contentRenderedMsg("alpha"))
+	send(key("/"), key("a"), key("l"), tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	send(tea.BackgroundColorMsg{Color: color.White})
+	if want := newStyles(false).searchSelectedMatchStyle.Render("al"); !strings.Contains(tm.View().Content, want) {
+		t.Errorf("expected the highlight in the light styles, got %q", tm.View().Content)
 	}
 }
 

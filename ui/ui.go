@@ -207,9 +207,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		m.common.styles = newStyles(msg.IsDark())
 		m.stash.stylePaginators(m.common.styles)
-		if len(m.pager.matches) > 0 {
-			m.pager.highlight()
-		}
 	case tea.KeyPressMsg:
 		// Pass keys through to the pager while its search prompt is open, and
 		// let it clear active search matches on esc.

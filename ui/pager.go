@@ -5,6 +5,7 @@ import (
 	"math"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -61,12 +62,15 @@ type pagerModel struct {
 	// it here so we can re-render it on resize.
 	currentDocument markdown
 
-	// Rendered content, sans search highlights.
-	content string
+	// The rendered content's lines, its searchText with the line number
+	// gutter blanked, and the offset of each line in that text. Searches and
+	// highlights work on the stripped text.
+	lines      []string
+	stripped   string
+	lineStarts []int
 
 	// Search state. While the prompt is open, the prompt's value is the
-	// active pattern; otherwise it's searchQuery. matches are byte offsets
-	// into the ANSI-stripped content, and matchLines their starting lines.
+	// active pattern; otherwise it's searchQuery.
 	searchInput textinput.Model
 	searching   bool
 	searchQuery string
@@ -116,8 +120,22 @@ func (m *pagerModel) setSize(w, h int) {
 }
 
 func (m *pagerModel) setContent(s string) {
-	m.content = s
+	// The viewport would draw tabs as spaces anyway. Doing it here keeps the
+	// search offsets in step with what's drawn.
+	s = strings.ReplaceAll(s, "\t", "    ")
 	m.viewport.SetContent(s)
+	if m.viewport.TotalLineCount() == 0 {
+		// The viewport shows nothing for a lone line it measures as zero width
+		s = ""
+	}
+	m.lines = strings.Split(s, "\n")
+	m.stripped = blankGutter(searchText(s), m.gutterWidth())
+	m.lineStarts = []int{0}
+	for i, c := range []byte(m.stripped) {
+		if c == '\n' {
+			m.lineStarts = append(m.lineStarts, i+1)
+		}
+	}
 }
 
 func (m *pagerModel) toggleHelp() {
@@ -266,7 +284,6 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 				break
 			}
 			m.matchIndex = min(i, len(m.matches)-1)
-			m.highlight()
 		}
 
 	// The file was changed on disk and we're reloading it
@@ -341,11 +358,9 @@ func (m *pagerModel) updateSearchInput(msg tea.Msg) tea.Cmd {
 func (m *pagerModel) incSearch() {
 	m.viewport.SetYOffset(m.prevYOffset)
 	m.search(m.searchInput.Value())
-	if len(m.matches) == 0 {
-		m.highlight()
-		return
+	if len(m.matches) > 0 {
+		m.selectMatch(nearestMatch(m.matchLines, m.prevYOffset))
 	}
-	m.selectMatch(nearestMatch(m.matchLines, m.prevYOffset))
 }
 
 // cancelSearch closes the search prompt, restoring the previous search and
@@ -359,7 +374,6 @@ func (m *pagerModel) cancelSearch() {
 		m.clearSearch()
 	} else {
 		m.matchIndex = min(m.prevMatchIndex, len(m.matches)-1)
-		m.highlight()
 	}
 	m.viewport.SetYOffset(m.prevYOffset)
 }
@@ -375,21 +389,18 @@ func (m *pagerModel) clearSearch() {
 	m.matches = nil
 	m.matchLines = nil
 	m.matchIndex = 0
-	m.highlight()
 }
 
-// search finds all matches for pattern in the content. It doesn't update the
-// highlights; see highlight.
 func (m *pagerModel) search(pattern string) {
-	m.matches = findMatches(m.content, pattern, m.gutterWidth())
+	m.matches = findMatches(m.stripped, pattern)
 	m.matchLines = make([]int, len(m.matches))
 	m.matchIndex = 0
 
-	stripped := searchText(m.content)
-	line, pos := 0, 0
+	line := 0
 	for i, match := range m.matches {
-		line += strings.Count(stripped[pos:match[0]], "\n")
-		pos = match[0]
+		for line+1 < len(m.lineStarts) && m.lineStarts[line+1] <= match[0] {
+			line++
+		}
 		m.matchLines[i] = line
 	}
 }
@@ -397,19 +408,7 @@ func (m *pagerModel) search(pattern string) {
 // selectMatch makes the given match the current one and scrolls to it.
 func (m *pagerModel) selectMatch(i int) {
 	m.matchIndex = i
-	m.highlight()
 	m.viewport.EnsureVisible(m.matchLines[i], 0, 0)
-}
-
-// highlight sets the viewport content with the current matches highlighted.
-func (m *pagerModel) highlight() {
-	m.viewport.SetContent(highlightMatches(
-		m.content,
-		m.matches,
-		m.matchIndex,
-		m.common.styles.searchMatchStyle,
-		m.common.styles.searchSelectedMatchStyle,
-	))
 }
 
 // gutterWidth returns the width of the line number gutter, if shown.
@@ -421,12 +420,30 @@ func (m pagerModel) gutterWidth() int {
 	return 0
 }
 
-// findMatches returns the byte offsets of all matches for pattern in the
-// searchText of content. ^ and $ match at line boundaries. Patterns without
-// uppercase letters, not counting escapes like \S, match case-insensitively
-// (smartcase) and invalid regular expressions match literally. Line numbers,
-// the first gutter columns of each line, are excluded from matching.
-func findMatches(content, pattern string, gutter int) [][]int {
+// blankGutter replaces the line numbers in text, the first gutter columns of
+// each line, with spaces, so they're neither matched nor compared across
+// reloads. Line numbers are ASCII, so byte offsets stay aligned.
+func blankGutter(text string, gutter int) string {
+	if gutter == 0 {
+		return text
+	}
+	buf := []byte(text)
+	start := 0
+	for i, line := range strings.Split(text, "\n") {
+		w := min(len(line), max(gutter, len(strconv.Itoa(i+1))))
+		for j := start; j < start+w; j++ {
+			buf[j] = ' '
+		}
+		start += len(line) + 1
+	}
+	return string(buf)
+}
+
+// findMatches returns the byte offsets of all matches for pattern in text.
+// ^ and $ match at line boundaries. Patterns without uppercase letters, not
+// counting escapes like \S, match case-insensitively (smartcase) and invalid
+// regular expressions match literally.
+func findMatches(text, pattern string) [][]int {
 	if pattern == "" {
 		return nil
 	}
@@ -448,22 +465,8 @@ func findMatches(content, pattern string, gutter int) [][]int {
 		re = regexp.MustCompile(flags + regexp.QuoteMeta(pattern))
 	}
 
-	// Blank out the gutter. Line numbers are ASCII, so byte offsets stay
-	// aligned with the stripped content.
-	text := []byte(searchText(content))
-	if gutter > 0 {
-		start := 0
-		for i, line := range strings.Split(string(text), "\n") {
-			w := min(len(line), max(gutter, len(strconv.Itoa(i+1))))
-			for j := start; j < start+w; j++ {
-				text[j] = ' '
-			}
-			start += len(line) + 1
-		}
-	}
-
 	// Drop empty matches, e.g. from "a*", as there's nothing to highlight
-	matches := re.FindAllIndex(text, -1)
+	matches := re.FindAllStringIndex(text, -1)
 	n := 0
 	for _, match := range matches {
 		if match[1] > match[0] {
@@ -485,63 +488,96 @@ func nearestMatch(matchLines []int, line int) int {
 	return 0
 }
 
-// highlightMatches styles the given matches, byte offsets into the
-// searchText of content, in content. The selected match is styled with
-// selectedStyle. We don't use the viewport's highlighting, as it misplaces
-// highlights in content containing ANSI sequences.
-func highlightMatches(content string, matches [][]int, selected int, style, selectedStyle lipgloss.Style) string {
-	if len(matches) == 0 {
-		return content
+// highlightLines styles the matches on rows, the viewport's view of the
+// content lines from first on. Rows map to lines one to one, as glow sets
+// neither SoftWrap nor a gutter. We don't use the viewport's highlighting, as
+// it misplaces highlights in content containing ANSI sequences.
+func (m pagerModel) highlightLines(rows []string, first int) []string {
+	if len(m.matches) == 0 {
+		return rows
 	}
 
-	lines := strings.Split(content, "\n")
-	stripped := strings.Split(searchText(content), "\n")
-	if len(lines) != len(stripped) {
-		return content
+	left, width := m.viewport.XOffset(), m.viewport.Width()
+	for i := range rows {
+		n := first + i
+		if n >= len(m.lines) {
+			break
+		}
+		start, end := m.lineStarts[n], len(m.stripped)
+		if n+1 < len(m.lineStarts) {
+			end = m.lineStarts[n+1] - 1
+		}
+
+		if strings.Contains(m.lines[n], osc66Prefix) {
+			// Sized text is zero-width to the viewport, which cuts around it,
+			// so highlight the whole line and cut like the viewport does.
+			ranges, sel := m.lineRanges(start, start, end)
+			rows[i] = xansi.Cut(highlightSizedLine(m.lines[n], ranges, sel), left, left+width)
+			continue
+		}
+
+		// StyleRanges takes columns of the row, which starts at from
+		line := m.stripped[start:end]
+		from, to := visibleWindow(line, left, width)
+		ranges, _ := m.lineRanges(start, start+from, start+to)
+		pos, col := from, 0
+		for k, r := range ranges {
+			col += xansi.StringWidth(line[pos:r.Start])
+			ranges[k].Start = col
+			col += xansi.StringWidth(line[r.Start:r.End])
+			ranges[k].End = col
+			pos = r.End
+		}
+		rows[i] = lipgloss.StyleRanges(rows[i], ranges...)
 	}
 
-	start, next := 0, 0 // byte offset of the current line, first unfinished match
-	for i, line := range stripped {
-		end := start + len(line)
-		var ranges []lipgloss.Range
-		sel := -1 // index of the selected match in ranges
-		for j := next; j < len(matches) && matches[j][0] <= end; j++ {
-			// Matches may span lines, so only style the part on this line
-			from, to := max(matches[j][0], start), min(matches[j][1], end)
-			if from >= to {
-				continue
-			}
-			st := style
-			if j == selected {
-				st = selectedStyle
-				sel = len(ranges)
-			}
-			ranges = append(ranges, lipgloss.NewRange(from-start, to-start, st))
-		}
+	return rows
+}
 
-		if strings.Contains(lines[i], osc66Prefix) {
-			lines[i] = highlightSizedLine(lines[i], ranges, sel)
-		} else {
-			// StyleRanges works with columns, not bytes
-			for k, r := range ranges {
-				ranges[k].Start = xansi.StringWidth(line[:r.Start])
-				ranges[k].End = xansi.StringWidth(line[:r.End])
-			}
-			lines[i] = lipgloss.StyleRanges(lines[i], ranges...)
+// lineRanges returns the parts of the matches within [from, to), byte offsets
+// into the stripped text, relative to start, the offset of their line, and
+// the index of the selected match among them, or -1.
+func (m pagerModel) lineRanges(start, from, to int) ([]lipgloss.Range, int) {
+	var ranges []lipgloss.Range
+	sel := -1
+	j := sort.Search(len(m.matches), func(i int) bool { return m.matches[i][1] > from })
+	for ; j < len(m.matches) && m.matches[j][0] < to; j++ {
+		lo, hi := max(m.matches[j][0], from), min(m.matches[j][1], to)
+		if lo >= hi {
+			continue
 		}
-
-		start = end + 1
-		for next < len(matches) && matches[next][1] <= start {
-			next++
+		st := m.common.styles.searchMatchStyle
+		if j == m.matchIndex {
+			st = m.common.styles.searchSelectedMatchStyle
+			sel = len(ranges)
 		}
+		ranges = append(ranges, lipgloss.NewRange(lo-start, hi-start, st))
 	}
+	return ranges, sel
+}
 
-	return strings.Join(lines, "\n")
+// visibleWindow returns the bytes of line, a line of stripped text, that the
+// viewport shows at horizontal offset left with the given width. The edges
+// follow ansi.Cut, which keeps the character the left edge falls in and drops
+// the one the right edge falls in.
+func visibleWindow(line string, left, width int) (from, to int) {
+	from = len(line) - len(xansi.TruncateLeft(line, left, ""))
+	col := xansi.StringWidth(line[:from])
+	for to = from; to < len(line); {
+		cluster, w := xansi.FirstGraphemeCluster(line[to:], xansi.GraphemeWidth)
+		if col+w > left+width {
+			break
+		}
+		to += len(cluster)
+		col += w
+	}
+	return from, to
 }
 
 func (m pagerModel) View() string {
 	var b strings.Builder
-	fmt.Fprint(&b, m.viewport.View()+"\n")
+	lines := m.highlightLines(strings.Split(m.viewport.View(), "\n"), m.viewport.YOffset())
+	fmt.Fprint(&b, strings.Join(lines, "\n")+"\n")
 
 	// Footer
 	m.statusBarView(&b)
@@ -819,7 +855,7 @@ func highlightSizedLine(line string, ranges []lipgloss.Range, selected int) stri
 
 	emit := func(s string, st lipgloss.Style, styled bool) {
 		if styled {
-			s = st.TabWidth(lipgloss.NoTabConversion).Render(s) + sgr.String()
+			s = st.Render(s) + sgr.String()
 		}
 		b.WriteString(s)
 	}
